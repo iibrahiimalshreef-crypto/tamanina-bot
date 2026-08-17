@@ -2,9 +2,29 @@ import asyncio
 import json
 import os
 import random
+import logging
+from threading import Thread
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# --- 1. خادم Flask لإبقاء السيرفر صاحياً عبر Render ---
+app_web = Flask('')
+
+@app_web.route('/')
+def home():
+    return "Bot is running perfectly!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app_web.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+# --- 2. إعدادات البوت وقائمة الأذكار ---
 BOT_TOKEN = "8867227824:AAFTkVDZ6ziSQgXmsDOK4Nzw6a3gP0E3wQU"
 CHATS_FILE = "chats.json"
 
@@ -107,6 +127,9 @@ async def post_init(app):
     asyncio.create_task(send_hourly_athkar(app))
 
 def main():
+    # تشغيل سيرفر Flask بالخلفية
+    keep_alive()
+
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     
