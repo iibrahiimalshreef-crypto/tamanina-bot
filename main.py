@@ -110,7 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_hourly_athkar(app):
     while True:
-        await asyncio.sleep(10)  # كل ساعة
+        await asyncio.sleep(3600)  # كل ساعة
         if subscribed_chats:
             text = random.choice(ATHKAR_LIST)
             for chat_id in list(subscribed_chats):
