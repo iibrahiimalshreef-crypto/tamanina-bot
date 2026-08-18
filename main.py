@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import random
 import logging
@@ -7,6 +6,7 @@ from threading import Thread
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from pymongo import MongoClient
 
 # --- 1. خادم Flask لإبقاء السيرفر صاحياً عبر Render ---
 app_web = Flask('')
@@ -24,9 +24,23 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# --- 2. إعدادات البوت وقائمة الأذكار ---
+# --- 2. إعدادات البوت وقاعدة البيانات MongoDB ---
 BOT_TOKEN = "8867227824:AAFTkVDZ6ziSQgXmsDOK4Nzw6a3gP0E3wQU"
-CHATS_FILE = "chats.json"
+
+# جلب رابط الاتصال من متغير البيئة MONGO_URI
+MONGO_URI = os.environ.get("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db = client['azkar_bot_db']
+chats_col = db['chats']
+
+def save_chat(chat_id):
+    """حفظ الـ chat_id في MongoDB إذا لم يكن موجوداً من قبل"""
+    if not chats_col.find_one({"chat_id": chat_id}):
+        chats_col.insert_one({"chat_id": chat_id})
+
+def get_all_chats():
+    """جلب كل المعرفات المخزنة في MongoDB"""
+    return [doc['chat_id'] for doc in chats_col.find()]
 
 ATHKAR_LIST = [
     # --- التسبيح والتحميد والتكبير ---
@@ -82,26 +96,9 @@ ATHKAR_LIST = [
     "اللَّهُمَّ آتِ نُفُوسَنَا تَقْوَاهَا، وَزَكِّهَا أَنْتَ خَيْرُ مَنْ زَكَّاهَا، أَنْتَ وَلِيُّهَا وَمَوْلاهَا."
 ]
 
-def load_chats():
-    if os.path.exists(CHATS_FILE):
-        try:
-            with open(CHATS_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
-
-def save_chats(chats):
-    with open(CHATS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(chats), f)
-
-subscribed_chats = load_chats()
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id not in subscribed_chats:
-        subscribed_chats.add(chat_id)
-        save_chats(subscribed_chats)
+    save_chat(chat_id)
     
     await update.message.reply_text(
         "🌿 **تم تفعيل بوت طُمأنينة بنجاح!**\n"
@@ -111,9 +108,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_hourly_athkar(app):
     while True:
         await asyncio.sleep(3600)  # كل ساعة
+        subscribed_chats = get_all_chats()
         if subscribed_chats:
             text = random.choice(ATHKAR_LIST)
-            for chat_id in list(subscribed_chats):
+            for chat_id in subscribed_chats:
                 try:
                     await app.bot.send_message(
                         chat_id=chat_id, 
@@ -133,7 +131,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     
-    print(f"بوت طُمأنينة يعمل الآن... (عدد المحادثات المسجلة: {len(subscribed_chats)})")
+    print(f"بوت طُمأنينة يعمل الآن متصلاً بـ MongoDB...")
     app.run_polling()
 
 if __name__ == '__main__':
