@@ -1,3 +1,5 @@
 python-telegram-bot
-flask
+Flask
 gunicorn
+pymongo
+dnspython
