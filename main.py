@@ -43,6 +43,9 @@ SURAH_KAHF_AUDIO = "https://server14.mp3quran.net/hazza/018.mp3"
 MORNING_ATHKAR_IMAGE = "https://i.ibb.co/sample_morning.jpg"
 EVENING_ATHKAR_IMAGE = "https://i.ibb.co/sample_evening.jpg"
 
+# مجموعة لحفظ مرجع المهام بالخلفية حتى لا يحذفها بايثون تلقائياً
+BACKGROUND_TASKS = set()
+
 MONGO_URI = os.environ.get("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client['azkar_bot_db']
@@ -272,7 +275,10 @@ async def master_scheduler(app):
         await asyncio.sleep(60)
 
 async def post_init(app):
-    asyncio.create_task(master_scheduler(app))
+    # إنشاء المهمة وحفظ مرجعها للوقاية من الـ Garbage Collection
+    task = asyncio.create_task(master_scheduler(app))
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(BACKGROUND_TASKS.discard)
 
 # --- 7. التشغيل الرئيسي ---
 def main():
