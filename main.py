@@ -222,7 +222,7 @@ async def master_scheduler(app):
                             except Exception as e:
                                 print(f"خطأ إرسال الذكر {chat_id}: {e}")
 
-                # ب) أذكار الصباح (6:00 صباحاً) - قراءة الملف المحلي
+                # ب) أذكار الصباح (6:00 صباحاً) - استخدام الصورة المرفوعة محلياً
                 if current_hour == 6 and current_minute < 5:
                     if chat.get("last_morning_sent") != today_str:
                         try:
@@ -236,11 +236,15 @@ async def master_scheduler(app):
                         except Exception as e:
                             print(f"خطأ أذكار الصباح {chat_id}: {e}")
 
-                # ج) أذكار المساء (5:00 مساءً) - قراءة الملف المحلي
+                # ج) أذكار المساء (5:00 مساءً) - استخدام الصورة المرفوعة محلياً
                 if current_hour == 17 and current_minute < 5:
                     if chat.get("last_evening_sent") != today_str:
                         try:
-                            caption_text = "```python
+                            caption_text = "الخطأ ناتج عن انقطاع نص البرمجة في السطر الخاص بأذكار المساء أثناء توليد الرسالة السابقة.
+
+قم بنسخ هذا الكود المكتمل بالكامل واستبدل به محتوى ملف `main.py` في GitHub لتتجاوز خطأ الـ `SyntaxError` فوراً:
+
+```python
 import asyncio
 import os
 import random
