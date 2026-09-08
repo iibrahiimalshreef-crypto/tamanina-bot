@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import urllib.parse
+from html import escape
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from threading import Thread
@@ -59,7 +60,13 @@ def keep_alive():
 # 2. إعدادات البوت والوسائط وقاعدة البيانات
 # =========================================================
 
-BOT_TOKEN = "8867227824:AAFTkVDZ6ziSQgXmsDOK4Nzw6a3gP0E3wQU"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "متغير البيئة BOT_TOKEN غير معرف! "
+        "تأكد من ضبطه في إعدادات Render قبل التشغيل."
+    )
 
 # ID حسابك المباشر للإحصائيات
 ADMIN_ID = 8955520748
@@ -90,11 +97,8 @@ if not MONGO_URI:
         "تأكد من ضبطه في إعدادات Render قبل التشغيل."
     )
 
-
 client = MongoClient(MONGO_URI)
-
 db = client["azkar_bot_db"]
-
 chats_col = db["chats"]
 
 # فهرس فريد على chat_id
@@ -106,24 +110,13 @@ chats_col.create_index("chat_id", unique=True)
 # =========================================================
 
 def save_or_update_chat(chat_id, chat_type="private", update_data=None):
-    """
-    إنشاء سجل للمحادثة أو تحديثه.
-    """
-
     default_data = {
         "chat_id": chat_id,
         "type": chat_type,
         "is_active": True,
-
-        # معدل الإرسال الافتراضي
         "interval_hours": 1,
-
-        # ساعات العمل الافتراضية
-        # من 5 صباحًا إلى 2 صباحًا
         "start_hour": 5,
         "end_hour": 2,
-
-        # آخر أوقات الإرسال
         "last_athkar_sent": None,
         "last_morning_sent": None,
         "last_evening_sent": None,
@@ -137,61 +130,35 @@ def save_or_update_chat(chat_id, chat_type="private", update_data=None):
                 {
                     "$set": update_data,
                     "$setOnInsert": {
-                        k: v
-                        for k, v in default_data.items()
+                        k: v for k, v in default_data.items()
                         if k not in update_data
                     }
                 },
                 upsert=True
             )
-
         else:
             chats_col.update_one(
                 {"chat_id": chat_id},
-                {
-                    "$setOnInsert": default_data
-                },
+                {"$setOnInsert": default_data},
                 upsert=True
             )
 
     except DuplicateKeyError:
-        logger.warning(
-            f"DuplicateKeyError عند upsert للمحادثة {chat_id}"
-        )
+        logger.warning(f"DuplicateKeyError عند upsert للمحادثة {chat_id}")
 
 
 def remove_chat(chat_id):
-    """
-    حذف المحادثة من قاعدة البيانات.
-    """
     try:
         chats_col.delete_one({"chat_id": chat_id})
     except Exception as e:
-        logger.error(
-            f"خطأ حذف المحادثة {chat_id}: {e}"
-        )
+        logger.error(f"خطأ حذف المحادثة {chat_id}: {e}")
 
 
 def get_chat_settings(chat_id, chat_type="private"):
-    """
-    جلب إعدادات المحادثة.
-    وإذا لم تكن موجودة يتم إنشاؤها.
-    """
-
-    chat = chats_col.find_one(
-        {"chat_id": chat_id}
-    )
-
+    chat = chats_col.find_one({"chat_id": chat_id})
     if not chat:
-        save_or_update_chat(
-            chat_id,
-            chat_type
-        )
-
-        return chats_col.find_one(
-            {"chat_id": chat_id}
-        )
-
+        save_or_update_chat(chat_id, chat_type)
+        return chats_col.find_one({"chat_id": chat_id})
     return chat
 
 
@@ -199,156 +166,48 @@ def get_chat_settings(chat_id, chat_type="private"):
 # 5. التحقق من ساعات العمل
 # =========================================================
 
-def is_within_working_hours(
-    current_hour,
-    start_hour=5,
-    end_hour=2
-):
-    """
-    يدعم الفترات التي تتجاوز منتصف الليل.
-
-    مثال:
-    5 -> 2
-
-    يعني:
-    05:00 صباحًا
-    إلى
-    02:00 صباحًا من اليوم التالي.
-    """
-
+def is_within_working_hours(current_hour, start_hour=5, end_hour=2):
     if start_hour == 0 and end_hour == 24:
         return True
 
     if start_hour < end_hour:
-        return (
-            start_hour <= current_hour < end_hour
-        )
+        return start_hour <= current_hour < end_hour
 
-    return (
-        current_hour >= start_hour
-        or current_hour < end_hour
-    )
+    return current_hour >= start_hour or current_hour < end_hour
 
 
 # =========================================================
 # 6. التحقق من صلاحيات المستخدم
 # =========================================================
 
-async def is_authorized_to_manage(
-    chat,
-    user_id,
-    bot
-):
-    """
-    التحقق من صلاحية المستخدم.
-
-    الخاص:
-        مسموح دائمًا.
-
-    القروب / السوبرقروب:
-        المالك أو المشرف فقط.
-
-    مهم:
-        إذا كان البوت غير قادر على الحصول على
-        معلومات الصلاحية من Telegram، نرفض الطلب
-        بدل السماح به تلقائيًا.
-    """
-
-    # -----------------------------------------
-    # المحادثة الخاصة
-    # -----------------------------------------
-
+async def is_authorized_to_manage(chat, user_id, bot):
     if chat.type == "private":
         return True
-
-
-    # -----------------------------------------
-    # القروبات
-    # -----------------------------------------
 
     if chat.type not in ("group", "supergroup"):
         return False
 
-
     try:
-        # -------------------------------------
-        # الطريقة الأولى:
-        # فحص المستخدم مباشرة
-        # -------------------------------------
-
-        member = await bot.get_chat_member(
-            chat_id=chat.id,
-            user_id=user_id
-        )
-
-        if member.status in (
-            "administrator",
-            "creator"
-        ):
+        member = await bot.get_chat_member(chat_id=chat.id, user_id=user_id)
+        if member.status in ("administrator", "creator"):
             return True
 
-
-        # -------------------------------------
-        # الطريقة الثانية:
-        # الحصول على قائمة المشرفين
-        # -------------------------------------
-
         try:
-            administrators = (
-                await bot.get_chat_administrators(
-                    chat.id
-                )
-            )
-
+            administrators = await bot.get_chat_administrators(chat.id)
             for administrator in administrators:
-
                 if administrator.user.id == user_id:
                     return True
-
         except Exception as e:
-            logger.warning(
-                f"تعذر جلب قائمة مشرفي القروب "
-                f"{chat.id}: {e}"
-            )
-
-
-        # -------------------------------------
-        # إذا كان عضوًا عاديًا
-        # -------------------------------------
+            logger.warning(f"تعذر جلب قائمة مشرفي القروب {chat.id}: {e}")
 
         return False
 
-
-    except Forbidden as e:
-
-        logger.warning(
-            f"Telegram رفض فحص صلاحية المستخدم "
-            f"{user_id} في القروب {chat.id}: {e}"
-        )
-
-        # مهم جدًا:
-        # لا نسمح تلقائيًا عند فشل التحقق
+    except (Forbidden, BadRequest) as e:
+        logger.warning(f"رفض فحص الصلاحيات للمستخدم {user_id} في القروب {chat.id}: {e}")
         return False
-
-
-    except BadRequest as e:
-
-        logger.warning(
-            f"Telegram أعاد BadRequest أثناء "
-            f"فحص الصلاحية {user_id} في {chat.id}: {e}"
-        )
-
-        return False
-
 
     except Exception as e:
-
-        logger.error(
-            f"خطأ غير متوقع أثناء فحص صلاحية "
-            f"{user_id} في القروب {chat.id}: {e}"
-        )
-
-        # الأمان أولًا
+        logger.error(f"خطأ غير متوقع أثناء فحص الصلاحية {user_id} في القروب {chat.id}: {e}")
         return False
 
 
@@ -359,25 +218,17 @@ async def is_authorized_to_manage(
 def parse_saved_datetime(value, tz):
     if not value:
         return None
-
     try:
-        saved_time = datetime.fromisoformat(
-            value
-        )
-
+        saved_time = datetime.fromisoformat(value)
         if saved_time.tzinfo is None:
-            saved_time = saved_time.replace(
-                tzinfo=tz
-            )
-
+            saved_time = saved_time.replace(tzinfo=tz)
         return saved_time
-
     except (ValueError, TypeError):
         return None
 
 
 # =========================================================
-# 8. قائمة الأذكار
+# 8. قائمة الأذكار (الآيات بالرسم العثماني المضبوط)
 # =========================================================
 
 ATHKAR_LIST = [
@@ -410,7 +261,7 @@ ATHKAR_LIST = [
     "﴿رَبِّ هَبْ لِي مِنْ لَدُنْكَ ذُرِّيَّةً طَيِّبَةً إِنَّكَ سَمِيعُ الدُّعَاءِ﴾",
     "﴿رَبِّ اجْعَلْنِي مُقِيمَ الصَّلاةِ وَمِنْ ذُرِّيَّتِي رَبَّنَا وَتَقَبَّلْ دُعَاءِ﴾",
     "﴿حَسْبِيَ اللَّهُ لا إِلَهَ إِلا هُوَ عَلَيْهِ تَوَكَّلْتُ وَهُوَ رَبُّ الْعَرْشِ الْعَظِيمِ﴾",
-    "رَضِيتُ بِاللَّهِ رَبّاً، وَبِالإِسْلامِ دِيناً، وَبِمُحَمَّدٍ صَلَّى اللَّهُ عَلَيْهِ وَسَلَّمَ نَبِيّاً وَرَسُولاً.",
+    "رَضِيتُ بِاللَّهِ رَبّاً، وَبالإِسْلامِ دِيناً، وَبِمُحَمَّدٍ صَلَّى اللَّهُ عَلَيْهِ وَسَلَّمَ نَبِيّاً وَرَسُولاً.",
     "يَا حَيُّ يَا قَيُّومُ بِرَحْمَتِكَ أَسْتَغِيثُ، أَصْلِحْ لِي شَأْنِي كُلَّهُ وَلا تَكِلْنِي إِلَى نَفْسِي طَرْفَةَ عَيْنٍ.",
     "لا إِلَهَ إِلا أَنْتَ سُبْحَانَكَ إِنِّي كُنْتُ مِنَ الظَّالِمِينَ.",
     "اللَّهُمَّ إِنِّي أَسْأَلُكَ الْعَفْوَ وَالْعَافِيَةَ فِي الدُّنْيَا وَالآخِرَةِ.",
@@ -427,92 +278,52 @@ ATHKAR_LIST = [
 
 
 # =========================================================
-# 9. إرسال الذكر الدوري
+# 9. إرسال الذكر الدوري (تغليظ النص ورابط مشاركة احترافي)
 # =========================================================
 
-async def send_periodic_athkar(
-    application,
-    chat_id,
-    tz
-):
-    text_athkar = random.choice(
-        ATHKAR_LIST
-    )
+async def send_periodic_athkar(application, chat_id, tz):
+    text_athkar = random.choice(ATHKAR_LIST)
 
-    message_text = (
-        f"✨ *طُمأنينة:*\n\n"
-        f"{text_athkar}"
-    )
+    # 1. ترميز النص لحماية رموز HTML
+    safe_text = escape(text_athkar)
 
-    share_url = (
-        "https://t.me/share/url?url="
-        + urllib.parse.quote(
-            message_text
-        )
-    )
+    # 2. إرسال الذكر مغلظاً بالكامل
+    message_text = f"✨ <b>طُمأنينة:</b>\n\n<b>{safe_text}</b>"
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "شارك الذكر 🔄",
-                    url=share_url
-                )
-            ]
-        ]
-    )
+    # 3. ضبط رابط المشاركة المباشر لتطبيقات تلجرام
+    share_text = f"✨ طُمأنينة:\n\n{text_athkar}"
+    share_url = "https://t.me/share/url?text=" + urllib.parse.quote(share_text)
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("شارك الأجر 🔄", url=share_url)]
+    ])
 
     try:
-
         await application.bot.send_message(
             chat_id=chat_id,
             text=message_text,
             reply_markup=keyboard,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
         sent_time = datetime.now(tz)
-
         chats_col.update_one(
             {"chat_id": chat_id},
-            {
-                "$set": {
-                    "last_athkar_sent":
-                        sent_time.isoformat()
-                }
-            }
+            {"$set": {"last_athkar_sent": sent_time.isoformat()}}
         )
-
         return True
 
     except Forbidden:
-
-        logger.warning(
-            f"البوت لم يعد يملك صلاحية الإرسال "
-            f"في المحادثة {chat_id}"
-        )
-
+        logger.warning(f"البوت مطرود أو محظور من المحادثة {chat_id}")
         remove_chat(chat_id)
-
         return False
 
     except BadRequest as e:
-
-        logger.warning(
-            f"BadRequest أثناء إرسال الذكر "
-            f"{chat_id}: {e}"
-        )
-
-        remove_chat(chat_id)
-
+        logger.warning(f"BadRequest أثناء إرسال الذكر {chat_id}: {e}")
         return False
 
     except Exception as e:
-
-        logger.error(
-            f"خطأ إرسال الذكر {chat_id}: {e}"
-        )
-
+        logger.error(f"خطأ إرسال الذكر {chat_id}: {e}")
         return False
 
 
@@ -520,11 +331,7 @@ async def send_periodic_athkar(
 # 10. أمر /start
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
 
@@ -532,125 +339,72 @@ async def start(
         return
 
     tz = RIYADH_TZ
-
-    authorized = await is_authorized_to_manage(
-        chat,
-        user.id,
-        context.bot
-    )
+    authorized = await is_authorized_to_manage(chat, user.id, context.bot)
 
     if not authorized:
-
         await update.message.reply_text(
             "🚫 هذا الأمر متاح فقط لمالك القروب أو المشرفين (الأدمن)."
         )
-
         return
 
-
-    existing = chats_col.find_one(
-        {"chat_id": chat.id}
-    )
-
+    existing = chats_col.find_one({"chat_id": chat.id})
 
     if existing:
-
         chats_col.update_one(
             {"chat_id": chat.id},
-            {
-                "$set": {
-                    "is_active": True,
-                    "last_athkar_sent": None
-                }
-            }
+            {"$set": {"is_active": True, "last_athkar_sent": None}}
         )
-
     else:
-
         save_or_update_chat(
             chat.id,
             chat.type,
-            update_data={
-                "is_active": True,
-                "last_athkar_sent": None
-            }
+            update_data={"is_active": True, "last_athkar_sent": None}
         )
 
-
     await update.message.reply_text(
-        "🌿 *تم تفعيل بوت طُمأنينة بنجاح!*\n\n"
+        "🌿 <b>تم تفعيل بوت طُمأنينة بنجاح!</b>\n\n"
         "سيقوم البوت بإرسال الأذكار دورياً، "
         "وأذكار الصباح والمساء، وسورة الكهف يوم الجمعة.\n\n"
         "⚙️ للتحكم بالإعدادات: /settings\n"
         "🛑 لإيقاف الإشعار المؤقت: /stop",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
-
-    config = get_chat_settings(
-        chat.id,
-        chat.type
-    )
-
+    config = get_chat_settings(chat.id, chat.type)
 
     if is_within_working_hours(
         datetime.now(tz).hour,
         config.get("start_hour", 5),
         config.get("end_hour", 2)
     ):
-
-        await send_periodic_athkar(
-            context.application,
-            chat.id,
-            tz
-        )
+        await send_periodic_athkar(context.application, chat.id, tz)
 
 
 # =========================================================
 # 11. أمر /stop
 # =========================================================
 
-async def stop(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
 
     if not chat or not user or not update.message:
         return
 
-
-    authorized = await is_authorized_to_manage(
-        chat,
-        user.id,
-        context.bot
-    )
-
+    authorized = await is_authorized_to_manage(chat, user.id, context.bot)
 
     if not authorized:
-
         await update.message.reply_text(
             "🚫 هذا الأمر متاح فقط لمالك القروب أو المشرفين (الأدمن)."
         )
-
         return
 
-
-    save_or_update_chat(
-        chat.id,
-        chat.type,
-        update_data={
-            "is_active": False
-        }
-    )
-
+    save_or_update_chat(chat.id, chat.type, update_data={"is_active": False})
 
     await update.message.reply_text(
-        "🛑 *تم إيقاف إرسال الأذكار بنجاح.*\n\n"
+        "🛑 <b>تم إيقاف إرسال الأذكار بنجاح.</b>\n\n"
         "يمكنك إعادة تشغيل البوت في أي وقت بإرسال: /start",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -658,904 +412,378 @@ async def stop(
 # 12. أمر /settings
 # =========================================================
 
-async def settings(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
 
     if not chat or not user or not update.message:
         return
 
-
-    authorized = await is_authorized_to_manage(
-        chat,
-        user.id,
-        context.bot
-    )
-
+    authorized = await is_authorized_to_manage(chat, user.id, context.bot)
 
     if not authorized:
-
         await update.message.reply_text(
             "🚫 هذا الأمر متاح فقط لمالك القروب أو المشرفين (الأدمن)."
         )
-
         return
 
-
-    config = get_chat_settings(
-        chat.id,
-        chat.type
-    )
-
+    config = get_chat_settings(chat.id, chat.type)
 
     keyboard = [
-
         [
-            InlineKeyboardButton(
-                "كل ساعة",
-                callback_data="set_int_1"
-            ),
-
-            InlineKeyboardButton(
-                "كل ساعتين",
-                callback_data="set_int_2"
-            )
+            InlineKeyboardButton("كل ساعة", callback_data="set_int_1"),
+            InlineKeyboardButton("كل ساعتين", callback_data="set_int_2")
         ],
-
         [
-            InlineKeyboardButton(
-                "كل 3 ساعات",
-                callback_data="set_int_3"
-            ),
-
-            InlineKeyboardButton(
-                "كل 4 ساعات",
-                callback_data="set_int_4"
-            )
+            InlineKeyboardButton("كل 3 ساعات", callback_data="set_int_3"),
+            InlineKeyboardButton("كل 4 ساعات", callback_data="set_int_4")
         ],
-
         [
-            InlineKeyboardButton(
-                "⏰ ساعات العمل (5 ص - 2 ص)",
-                callback_data="set_hours_normal"
-            )
+            InlineKeyboardButton("⏰ ساعات العمل (5 ص - 2 ص)", callback_data="set_hours_normal")
         ],
-
         [
-            InlineKeyboardButton(
-                "🌐 24 ساعة بدون إيقاف",
-                callback_data="set_hours_24"
-            )
+            InlineKeyboardButton("🌐 24 ساعة بدون إيقاف", callback_data="set_hours_24")
         ],
-
         [
             InlineKeyboardButton(
-                "🔴 إيقاف الإشعارات"
-                if config.get("is_active", True)
-                else "🟢 تشغيل الإشعارات",
-
+                "🔴 إيقاف الإشعارات" if config.get("is_active", True) else "🟢 تشغيل الإشعارات",
                 callback_data="toggle_active"
             )
         ]
     ]
 
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    reply_markup = InlineKeyboardMarkup(
-        keyboard
-    )
+    status_str = "🟢 شغال" if config.get("is_active", True) else "🔴 متوقف"
+    start_hour = config.get("start_hour", 5)
+    end_hour = config.get("end_hour", 2)
 
-
-    status_str = (
-        "🟢 شغال"
-        if config.get("is_active", True)
-        else "🔴 متوقف"
-    )
-
-
-    start_hour = config.get(
-        "start_hour",
-        5
-    )
-
-    end_hour = config.get(
-        "end_hour",
-        2
-    )
-
-
-    if (
-        start_hour == 0
-        and end_hour == 24
-    ):
-
-        hours_text = (
-            "24 ساعة بدون توقف"
-        )
-
+    if start_hour == 0 and end_hour == 24:
+        hours_text = "24 ساعة بدون توقف"
     else:
-
-        hours_text = (
-            f"{start_hour}:00 - "
-            f"{end_hour}:00"
-        )
-
+        hours_text = f"{start_hour}:00 - {end_hour}:00"
 
     text = (
-        "⚙️ *إعدادات بوت طُمأنينة:*\n\n"
-        f"• *حالة البوت:* {status_str}\n"
-        f"• *معدل تكرار الأذكار:* "
-        f"كل {config.get('interval_hours', 1)} ساعة\n"
-        f"• *ساعات العمل:* {hours_text}\n\n"
+        "⚙️ <b>إعدادات بوت طُمأنينة:</b>\n\n"
+        f"• <b>حالة البوت:</b> {status_str}\n"
+        f"• <b>معدل تكرار الأذكار:</b> كل {config.get('interval_hours', 1)} ساعة\n"
+        f"• <b>ساعات العمل:</b> {hours_text}\n\n"
         "اختر من الأزرار للتعديل:"
     )
 
-
-    await update.message.reply_text(
-        text,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 # =========================================================
 # 13. أمر /stats
 # =========================================================
 
-async def stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
         return
 
-
     user_id = update.effective_user.id
-
-
     if user_id != ADMIN_ID:
         return
 
-
     total_chats = chats_col.count_documents({})
-
-    active_chats = chats_col.count_documents(
-        {"is_active": True}
-    )
-
-    private_chats = chats_col.count_documents(
-        {"type": "private"}
-    )
-
-    group_chats = chats_col.count_documents(
-        {
-            "type": {
-                "$in": [
-                    "group",
-                    "supergroup"
-                ]
-            }
-        }
-    )
-
+    active_chats = chats_col.count_documents({"is_active": True})
+    private_chats = chats_col.count_documents({"type": "private"})
+    group_chats = chats_col.count_documents({"type": {"$in": ["group", "supergroup"]}})
 
     text = (
-        "📊 *إحصائيات بوت طُمأنينة:*\n\n"
-        f"• *إجمالي المسجلين:* {total_chats}\n"
-        f"• *المشتركين النشطين:* {active_chats}\n"
-        f"• *المحادثات الخاصة:* {private_chats}\n"
-        f"• *المجموعات:* {group_chats}"
+        "📊 <b>إحصائيات بوت طُمأنينة:</b>\n\n"
+        f"• <b>إجمالي المسجلين:</b> {total_chats}\n"
+        f"• <b>المشتركين النشطين:</b> {active_chats}\n"
+        f"• <b>المحادثات الخاصة:</b> {private_chats}\n"
+        f"• <b>المجموعات:</b> {group_chats}"
     )
 
-
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 # =========================================================
 # 14. التعامل مع الأزرار
 # =========================================================
 
-async def button_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-
     if not query or not query.message:
         return
 
-
     chat = query.message.chat
-
     user = query.from_user
 
-
-    authorized = await is_authorized_to_manage(
-        chat,
-        user.id,
-        context.bot
-    )
-
+    authorized = await is_authorized_to_manage(chat, user.id, context.bot)
 
     if not authorized:
-
-        await query.answer(
-            "🚫 هذا الإجراء متاح فقط لمالك القروب أو المشرفين.",
-            show_alert=True
-        )
-
+        await query.answer("🚫 هذا الإجراء متاح فقط لمالك القروب أو المشرفين.", show_alert=True)
         return
-
 
     await query.answer()
 
-
     chat_id = query.message.chat_id
-
     data = query.data
-
     tz = RIYADH_TZ
 
-
-    # =====================================================
-    # تغيير معدل الإرسال
-    # =====================================================
-
     if data.startswith("set_int_"):
-
-        interval = int(
-            data.split("_")[2]
-        )
-
-
-        config = get_chat_settings(
-            chat_id,
-            chat.type
-        )
-
+        interval = int(data.split("_")[2])
+        config = get_chat_settings(chat_id, chat.type)
 
         save_or_update_chat(
             chat_id,
             chat.type,
             update_data={
                 "interval_hours": interval,
-
-                # تصفير آخر إرسال
-                # حتى يبدأ العد من الذكر الجديد
                 "last_athkar_sent": None,
-
                 "is_active": True
             }
         )
 
-
-        current_hour = datetime.now(
-            tz
-        ).hour
-
+        current_hour = datetime.now(tz).hour
 
         if is_within_working_hours(
             current_hour,
-            config.get(
-                "start_hour",
-                5
-            ),
-            config.get(
-                "end_hour",
-                2
-            )
+            config.get("start_hour", 5),
+            config.get("end_hour", 2)
         ):
-
-            sent = await send_periodic_athkar(
-                context.application,
-                chat_id,
-                tz
-            )
-
-
+            sent = await send_periodic_athkar(context.application, chat_id, tz)
             if sent:
-
                 await query.edit_message_text(
-                    "✅ *تم ضبط معدل الإرسال بنجاح!*\n\n"
-                    f"📿 سيتم إرسال ذكر كل *{interval} ساعة*.\n\n"
-                    "✨ تم إرسال أول ذكر الآن، "
-                    "وسيبدأ العد من وقت إرساله.",
-                    parse_mode="Markdown"
+                    "✅ <b>تم ضبط معدل الإرسال بنجاح!</b>\n\n"
+                    f"📿 سيتم إرسال ذكر كل <b>{interval} ساعة</b>.\n\n"
+                    "✨ تم إرسال أول ذكر الآن، وسيبدأ العد من وقت إرساله.",
+                    parse_mode="HTML"
                 )
-
             else:
-
-                await query.edit_message_text(
-                    "⚠️ تعذر إرسال الذكر حاليًا.",
-                    parse_mode="Markdown"
-                )
-
+                await query.edit_message_text("⚠️ تعذر إرسال الذكر حاليًا.", parse_mode="HTML")
         else:
-
             await query.edit_message_text(
-                "✅ *تم تغيير معدل الإرسال بنجاح!*\n\n"
-                f"📿 كل *{interval} ساعة*.\n\n"
-                "⏰ أنت حاليًا خارج ساعات العمل، "
-                "وسيبدأ الإرسال عند دخول ساعات العمل.",
-                parse_mode="Markdown"
+                "✅ <b>تم تغيير معدل الإرسال بنجاح!</b>\n\n"
+                f"📿 كل <b>{interval} ساعة</b>.\n\n"
+                "⏰ أنت حاليًا خارج ساعات العمل، وسيبدأ الإرسال عند دخول ساعات العمل.",
+                parse_mode="HTML"
             )
-
-
-    # =====================================================
-    # ساعات العمل العادية
-    # =====================================================
 
     elif data == "set_hours_normal":
-
-        save_or_update_chat(
-            chat_id,
-            chat.type,
-            update_data={
-                "start_hour": 5,
-                "end_hour": 2
-            }
-        )
-
-
+        save_or_update_chat(chat_id, chat.type, update_data={"start_hour": 5, "end_hour": 2})
         await query.edit_message_text(
-            "✅ تم ضبط ساعات العمل:\n\n"
-            "*من 5:00 صباحًا حتى 2:00 صباحًا*",
-            parse_mode="Markdown"
+            "✅ تم ضبط ساعات العمل:\n\n<b>من 5:00 صباحًا حتى 2:00 صباحًا</b>",
+            parse_mode="HTML"
         )
-
-
-    # =====================================================
-    # العمل 24 ساعة
-    # =====================================================
 
     elif data == "set_hours_24":
-
-        save_or_update_chat(
-            chat_id,
-            chat.type,
-            update_data={
-                "start_hour": 0,
-                "end_hour": 24
-            }
-        )
-
-
+        save_or_update_chat(chat_id, chat.type, update_data={"start_hour": 0, "end_hour": 24})
         await query.edit_message_text(
-            "✅ تم ضبط البوت ليعمل:\n\n"
-            "*على مدار 24 ساعة بدون توقف*",
-            parse_mode="Markdown"
+            "✅ تم ضبط البوت ليعمل:\n\n<b>على مدار 24 ساعة بدون توقف</b>",
+            parse_mode="HTML"
         )
-
-
-    # =====================================================
-    # تشغيل / إيقاف
-    # =====================================================
 
     elif data == "toggle_active":
-
-        config = chats_col.find_one(
-            {"chat_id": chat_id}
-        )
-
-
+        config = chats_col.find_one({"chat_id": chat_id})
         if not config:
+            save_or_update_chat(chat_id, chat.type)
+            config = chats_col.find_one({"chat_id": chat_id})
 
-            save_or_update_chat(
-                chat_id,
-                chat.type
-            )
-
-            config = chats_col.find_one(
-                {"chat_id": chat_id}
-            )
-
-
-        current_state = config.get(
-            "is_active",
-            True
-        )
-
-
+        current_state = config.get("is_active", True)
         new_state = not current_state
 
+        update_data = {"is_active": new_state}
+        if new_state:
+            update_data["last_athkar_sent"] = None
 
-        update_data = {
-            "is_active": new_state
-        }
-
+        save_or_update_chat(chat_id, chat.type, update_data=update_data)
 
         if new_state:
-
-            # عند إعادة التشغيل
-            # يبدأ العد من أول ذكر
-            update_data[
-                "last_athkar_sent"
-            ] = None
-
-
-        save_or_update_chat(
-            chat_id,
-            chat.type,
-            update_data=update_data
-        )
-
-
-        if new_state:
-
-            config = get_chat_settings(
-                chat_id,
-                chat.type
-            )
-
-
-            current_hour = datetime.now(
-                tz
-            ).hour
-
+            config = get_chat_settings(chat_id, chat.type)
+            current_hour = datetime.now(tz).hour
 
             if is_within_working_hours(
                 current_hour,
-                config.get(
-                    "start_hour",
-                    5
-                ),
-                config.get(
-                    "end_hour",
-                    2
-                )
+                config.get("start_hour", 5),
+                config.get("end_hour", 2)
             ):
-
-                sent = await send_periodic_athkar(
-                    context.application,
-                    chat_id,
-                    tz
-                )
-
-
+                sent = await send_periodic_athkar(context.application, chat_id, tz)
                 if sent:
-
-                    msg = (
-                        "🟢 *تم تشغيل الإشعارات بنجاح!*\n\n"
-                        "✨ تم إرسال ذكر الآن، "
-                        "وسيبدأ العد من وقت الإرسال."
-                    )
-
+                    msg = "🟢 <b>تم تشغيل الإشعارات بنجاح!</b>\n\n✨ تم إرسال ذكر الآن، وسيبدأ العد من وقت الإرسال."
                 else:
-
-                    msg = (
-                        "🟢 تم تشغيل الإشعارات، "
-                        "لكن تعذر إرسال الذكر الآن."
-                    )
-
+                    msg = "🟢 تم تشغيل الإشعارات، لكن تعذر إرسال الذكر الآن."
             else:
-
-                msg = (
-                    "🟢 *تم تشغيل الإشعارات بنجاح!*\n\n"
-                    "⏰ أنت خارج ساعات العمل حاليًا، "
-                    "وسيبدأ الإرسال عند دخول ساعات العمل."
-                )
-
+                msg = "🟢 <b>تم تشغيل الإشعارات بنجاح!</b>\n\n⏰ أنت خارج ساعات العمل حاليًا، وسيبدأ الإرسال عند دخول ساعات العمل."
         else:
+            msg = "🔴 <b>تم إيقاف الإشعارات مؤقتاً.</b>"
 
-            msg = (
-                "🔴 *تم إيقاف الإشعارات مؤقتاً.*"
-            )
-
-
-        await query.edit_message_text(
-            msg,
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(msg, parse_mode="HTML")
 
 
 # =========================================================
 # 15. إرسال أذكار الصباح
 # =========================================================
 
-async def send_morning_athkar(
-    application,
-    chat_id,
-    today_str
-):
-
+async def send_morning_athkar(application, chat_id, today_str):
     try:
-
         caption_text = (
-            "🌅 *أذكار الصباح*\n\n"
-            "أصبحنا وأصبح الملك لله، "
-            "والحمد لله ولا إله إلا الله."
+            "🌅 <b>أذكار الصباح</b>\n\n"
+            "أصبحنا وأصبح الملك لله، والحمد لله ولا إله إلا الله."
         )
 
-
-        if os.path.exists(
-            MORNING_IMAGE_PATH
-        ):
-
-            with open(
-                MORNING_IMAGE_PATH,
-                "rb"
-            ) as photo:
-
+        if os.path.exists(MORNING_IMAGE_PATH):
+            with open(MORNING_IMAGE_PATH, "rb") as photo:
                 await application.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
                     caption=caption_text,
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
-
         else:
-
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=caption_text,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
-
 
         chats_col.update_one(
             {"chat_id": chat_id},
-            {
-                "$set": {
-                    "last_morning_sent":
-                        today_str
-                }
-            }
+            {"$set": {"last_morning_sent": today_str}}
         )
-
 
     except Forbidden:
-
         remove_chat(chat_id)
-
-
-    except BadRequest:
-
-        remove_chat(chat_id)
-
-
+    except BadRequest as e:
+        logger.warning(f"BadRequest أذكار الصباح {chat_id}: {e}")
     except Exception as e:
-
-        logger.error(
-            f"خطأ أذكار الصباح {chat_id}: {e}"
-        )
+        logger.error(f"خطأ أذكار الصباح {chat_id}: {e}")
 
 
 # =========================================================
 # 16. إرسال أذكار المساء
 # =========================================================
 
-async def send_evening_athkar(
-    application,
-    chat_id,
-    today_str
-):
-
+async def send_evening_athkar(application, chat_id, today_str):
     try:
-
         caption_text = (
-            "🌆 *أذكار المساء*\n\n"
-            "أمسينا وأمسى الملك لله، "
-            "والحمد لله ولا إله إلا الله."
+            "🌆 <b>أذكار المساء</b>\n\n"
+            "أمسينا وأمسى الملك لله، والحمد لله ولا إله إلا الله."
         )
 
-
-        if os.path.exists(
-            EVENING_IMAGE_PATH
-        ):
-
-            with open(
-                EVENING_IMAGE_PATH,
-                "rb"
-            ) as photo:
-
+        if os.path.exists(EVENING_IMAGE_PATH):
+            with open(EVENING_IMAGE_PATH, "rb") as photo:
                 await application.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
                     caption=caption_text,
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
-
         else:
-
             await application.bot.send_message(
                 chat_id=chat_id,
                 text=caption_text,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
-
 
         chats_col.update_one(
             {"chat_id": chat_id},
-            {
-                "$set": {
-                    "last_evening_sent":
-                        today_str
-                }
-            }
+            {"$set": {"last_evening_sent": today_str}}
         )
-
 
     except Forbidden:
-
         remove_chat(chat_id)
-
-
-    except BadRequest:
-
-        remove_chat(chat_id)
-
-
+    except BadRequest as e:
+        logger.warning(f"BadRequest أذكار المساء {chat_id}: {e}")
     except Exception as e:
-
-        logger.error(
-            f"خطأ أذكار المساء {chat_id}: {e}"
-        )
+        logger.error(f"خطأ أذكار المساء {chat_id}: {e}")
 
 
 # =========================================================
 # 17. إرسال سورة الكهف
 # =========================================================
 
-async def send_friday_surah(
-    application,
-    chat_id,
-    today_str
-):
-
+async def send_friday_surah(application, chat_id, today_str):
     try:
-
         caption_text = (
-            "📖 *سورة الكهف | نورٌ ما بين الجمعتين*\n\n"
-            "✨ *صلوا على خير الأنام وآله ﷺ*"
+            "📖 <b>سورة الكهف | نورٌ ما بين الجمعتين</b>\n\n"
+            "✨ <b>صلوا على خير الأنام وآله ﷺ</b>"
         )
-
 
         await application.bot.send_audio(
             chat_id=chat_id,
             audio=SURAH_KAHF_AUDIO,
             caption=caption_text,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
-
 
         chats_col.update_one(
             {"chat_id": chat_id},
-            {
-                "$set": {
-                    "last_friday_sent":
-                        today_str
-                }
-            }
+            {"$set": {"last_friday_sent": today_str}}
         )
-
 
     except Forbidden:
-
         remove_chat(chat_id)
-
-
-    except BadRequest:
-
-        remove_chat(chat_id)
-
-
+    except BadRequest as e:
+        logger.warning(f"BadRequest سورة الكهف {chat_id}: {e}")
     except Exception as e:
-
-        logger.error(
-            f"خطأ الجمعة {chat_id}: {e}"
-        )
+        logger.error(f"خطأ الجمعة {chat_id}: {e}")
 
 
 # =========================================================
 # 18. المجدول الرئيسي
 # =========================================================
 
-async def master_scheduler(
-    application
-):
-
+async def master_scheduler(application):
     tz = RIYADH_TZ
 
-
     while True:
-
         try:
-
             now = datetime.now(tz)
-
             current_hour = now.hour
-
             current_minute = now.minute
 
-
-            chats = list(
-                chats_col.find(
-                    {
-                        "is_active": {
-                            "$ne": False
-                        }
-                    }
-                )
-            )
-
+            chats = list(chats_col.find({"is_active": {"$ne": False}}))
 
             for chat in chats:
-
                 chat_id = chat["chat_id"]
+                interval = chat.get("interval_hours", 1)
+                start_h = chat.get("start_hour", 5)
+                end_h = chat.get("end_hour", 2)
 
-
-                interval = chat.get(
-                    "interval_hours",
-                    1
-                )
-
-
-                start_h = chat.get(
-                    "start_hour",
-                    5
-                )
-
-
-                end_h = chat.get(
-                    "end_hour",
-                    2
-                )
-
-
-                # =================================================
                 # أ) الأذكار الدورية
-                # =================================================
-
-                if is_within_working_hours(
-                    current_hour,
-                    start_h,
-                    end_h
-                ):
-
-                    last_sent = parse_saved_datetime(
-                        chat.get(
-                            "last_athkar_sent"
-                        ),
-                        tz
-                    )
-
-
+                if is_within_working_hours(current_hour, start_h, end_h):
+                    last_sent = parse_saved_datetime(chat.get("last_athkar_sent"), tz)
                     should_send = False
 
-
                     if last_sent is None:
-
                         should_send = True
-
                     else:
-
-                        next_send_time = (
-                            last_sent
-                            + timedelta(
-                                hours=interval
-                            )
-                        )
-
-
+                        next_send_time = last_sent + timedelta(hours=interval)
                         if now >= next_send_time:
-
                             should_send = True
 
-
                     if should_send:
+                        await send_periodic_athkar(application, chat_id, tz)
 
-                        await send_periodic_athkar(
-                            application,
-                            chat_id,
-                            tz
-                        )
-
-
-                # =================================================
                 # ب) أذكار الصباح - 6 صباحًا
-                # =================================================
+                if current_hour == 6 and current_minute < 5:
+                    today_str = now.strftime("%Y-%m-%d")
+                    if chat.get("last_morning_sent") != today_str:
+                        await send_morning_athkar(application, chat_id, today_str)
 
-                if (
-                    current_hour == 6
-                    and current_minute < 5
-                ):
-
-                    today_str = now.strftime(
-                        "%Y-%m-%d"
-                    )
-
-
-                    if (
-                        chat.get(
-                            "last_morning_sent"
-                        )
-                        != today_str
-                    ):
-
-                        await send_morning_athkar(
-                            application,
-                            chat_id,
-                            today_str
-                        )
-
-
-                # =================================================
                 # ج) أذكار المساء - 5 مساءً
-                # =================================================
+                if current_hour == 17 and current_minute < 5:
+                    today_str = now.strftime("%Y-%m-%d")
+                    if chat.get("last_evening_sent") != today_str:
+                        await send_evening_athkar(application, chat_id, today_str)
 
-                if (
-                    current_hour == 17
-                    and current_minute < 5
-                ):
-
-                    today_str = now.strftime(
-                        "%Y-%m-%d"
-                    )
-
-
-                    if (
-                        chat.get(
-                            "last_evening_sent"
-                        )
-                        != today_str
-                    ):
-
-                        await send_evening_athkar(
-                            application,
-                            chat_id,
-                            today_str
-                        )
-
-
-                # =================================================
                 # د) يوم الجمعة - سورة الكهف 9 صباحًا
-                # =================================================
+                if now.weekday() == 4 and current_hour == 9 and current_minute < 5:
+                    today_str = now.strftime("%Y-%m-%d")
+                    if chat.get("last_friday_sent") != today_str:
+                        await send_friday_surah(application, chat_id, today_str)
 
-                if (
-                    now.weekday() == 4
-                    and current_hour == 9
-                    and current_minute < 5
-                ):
-
-                    today_str = now.strftime(
-                        "%Y-%m-%d"
-                    )
-
-
-                    if (
-                        chat.get(
-                            "last_friday_sent"
-                        )
-                        != today_str
-                    ):
-
-                        await send_friday_surah(
-                            application,
-                            chat_id,
-                            today_str
-                        )
-
-
-                # إعطاء فرصة للمهام الأخرى
                 await asyncio.sleep(0.05)
 
-
         except Exception as e:
+            logger.error(f"خطأ المجدول الرئيسي: {e}")
 
-            logger.error(
-                f"خطأ المجدول الرئيسي: {e}"
-            )
-
-
-        # فحص كل دقيقة
         await asyncio.sleep(60)
 
 
@@ -1564,16 +792,9 @@ async def master_scheduler(
 # =========================================================
 
 async def post_init(application):
-
-    task = asyncio.create_task(
-        master_scheduler(application)
-    )
-
+    task = asyncio.create_task(master_scheduler(application))
     BACKGROUND_TASKS.add(task)
-
-    task.add_done_callback(
-        BACKGROUND_TASKS.discard
-    )
+    task.add_done_callback(BACKGROUND_TASKS.discard)
 
 
 # =========================================================
@@ -1581,10 +802,7 @@ async def post_init(application):
 # =========================================================
 
 def main():
-
-    # تشغيل Flask
     keep_alive()
-
 
     application = (
         ApplicationBuilder()
@@ -1593,53 +811,13 @@ def main():
         .build()
     )
 
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("settings", settings))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CallbackQueryHandler(button_callback))
 
-    # الأوامر
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
-    )
-
-
-    application.add_handler(
-        CommandHandler(
-            "stop",
-            stop
-        )
-    )
-
-
-    application.add_handler(
-        CommandHandler(
-            "settings",
-            settings
-        )
-    )
-
-
-    application.add_handler(
-        CommandHandler(
-            "stats",
-            stats
-        )
-    )
-
-
-    # الأزرار
-    application.add_handler(
-        CallbackQueryHandler(
-            button_callback
-        )
-    )
-
-
-    logger.info(
-        "✅ بوت طُمأنينة يعمل الآن بنجاح..."
-    )
-
-
+    logger.info("✅ بوت طُمأنينة يعمل الآن بنجاح...")
     application.run_polling()
 
 
